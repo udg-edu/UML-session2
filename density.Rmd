@@ -1,0 +1,167 @@
+---
+title: "Estimació de densitats"
+author: "Marc Comas"
+date: "11/29/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+diabetes = fread('diabetes.csv')
+```
+
+```{r}
+X = diabetes[,1:5]
+```
+
+Paràmetres d'una normal estimats per maxima versemblança
+
+```{r}
+SIGMA = cov(X) * (nrow(X)-1) / nrow(X)
+MEAN = colMeans(X)
+sum(mvtnorm::dmvnorm(X, MEAN , SIGMA, log = TRUE))
+```
+
+```{r}
+library(mclust)
+model = Mclust(X)
+model
+```
+
+```{r}
+model$classification
+```
+
+```{python}
+import datatable as dt
+diabetes = dt.fread('diabetes.csv')
+X = diabetes[:,0:5]
+
+from sklearn.covariance import EmpiricalCovariance
+from scipy.stats import multivariate_normal
+
+Mu = X.mean()
+emp_cov = EmpiricalCovariance().fit(X)
+Sigma = emp_cov.covariance_
+
+Norm = multivariate_normal(mean=Mu.to_numpy()[0], cov=Sigma)
+# Minimum log-Likelihood
+sum(Norm.logpdf(X))
+```
+
+```{python}
+import numpy as np
+from sklearn.mixture import GaussianMixture
+lowest_bic = np.infty
+bic = []
+n_components_range = range(1, 7)
+cv_types = ["spherical", "tied", "diag", "full"]
+for cv_type in cv_types:
+  for n_components in n_components_range:
+    # Fit a Gaussian mixture with EM
+    gmm = GaussianMixture(n_components=n_components, random_state=0, 
+                          covariance_type=cv_type, n_init=20, 
+                          max_iter = 1000)
+    gmm = gmm.fit(X)
+    bic.append(gmm.bic(X))
+    if bic[-1] < lowest_bic:
+      lowest_bic = bic[-1]
+      best_gmm = gmm
+
+best_gmm
+best_gmm.score_samples(X[0:10,:])
+```
+
+```{r}
+library(reticulate)
+model
+py$best_gmm
+table("mclust" = predict(model, X)$classification, 
+      "sklearn" = py$best_gmm$predict(X))
+```
+
+```{r}
+mdr = MclustDR(model)
+plot(mdr)
+```
+
+# Kernel density estimation
+
+```{r}
+dkernel = fread("kernel.csv")
+```
+
+```{r}
+K1 = function(h){
+  1/sqrt(2*pi) * exp(-h^2/2)
+}
+```
+
+Densitat original
+
+```{r}
+m = list(C1 = list(p = 0.2, mu = -4, sigma = 2),
+         C2 = list(p = 0.3, mu = 0, sigma = 1),
+         C3 = list(p = 0.5, mu = 4, sigma = 1.5))
+
+
+x = seq(-10, 10, 0.01)
+
+px = rowSums(sapply(1:length(m), function(j) m[[j]]$p * dnorm(x, m[[j]]$mu, m[[j]]$sigma)))
+plot(x, px, type = 'l', col = 'blue')
+```
+
+Com és el Kernel que utilitzem?
+
+```{r, eval=FALSE}
+x = seq(-4, 4, 0.01)
+px = K1(x)
+plot(x, px, type = 'l')
+```
+
+Creem l'estimació amb funció nuclie de bandwidth = 0.1
+
+```{r}
+f_b = function(x, xn, b, K){
+    1/b * sapply(x, function(x_) mean(K((x_ - xn) / b)))
+}
+f_overfit = f_b(x, xn = dkernel$X, b = 0.1, K1)
+plot(x, px, type = 'l', col = 'blue')
+points(x, f_overfit, type = 'l', col = 'red')
+
+f_underfit = f_b(x, xn = dkernel$X, b = 2, K1)
+points(x, f_underfit, type = 'l', col = 'orange')
+```
+
+```{r}
+cost_function = function(xn, b, K){
+  range_ = range(xn)
+  sd_ = sd(xn)
+  l_int = range_[1] - 1.5 * sd_
+  u_int = range_[2] + 1.5 * sd_
+  
+  f_est = function(x) f_b(x, xn = xn, b = b, K = K)
+  steps_ = 1000
+  I1 = sum(f_est(seq(l_int, u_int, length.out = steps_))^2) * (u_int-l_int) / steps_
+  # I1 = integrate(function(x) f_est(x)^2, -Inf, Inf)$value
+  I2 = mean(sapply(1:length(xn), function(i) f_b(xn[i], xn[-i], b, K)))
+  I1 - 2 * I2
+}
+```
+
+```{r}
+dcost = data.table(b=seq(0.1, 1.1, 0.02))
+dcost[, cost := sapply(b, function(b_) cost_function(dkernel$X, b_, K1))]
+ggplot() +
+  geom_line(data=dcost, aes(x = b, y = cost))
+```
+
+```{r}
+f_mice = f_b(x, xn = dkernel$X, b = 0.4, K1)
+points(x, f_mice, type = 'l', col = 'purple')
+```
+
